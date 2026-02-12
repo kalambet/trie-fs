@@ -1,4 +1,4 @@
-// Package triefs contains implementation of helper methods and types to work with user file system
+// Package triefs implements a concurrent, in-memory trie-based file system for path-keyed storage.
 package triefs
 
 import (
