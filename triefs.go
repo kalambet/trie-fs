@@ -1,9 +1,8 @@
-// Package filesystem contains implementation of helper methods and types to work with user file system
-package filesystem
+// Package triefs contains implementation of helper methods and types to work with user file system
+package triefs
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -14,10 +13,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	protov1 "imploy/lib/files/proto/v1"
-
-	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 )
 
 const (
@@ -67,50 +62,6 @@ type Entry struct {
 	Path    string   `json:"path"`
 	Entries []*Entry `json:"entries"`
 	Meta    *Meta    `json:"meta,omitempty"`
-}
-
-// FromProto converts protobuf to Entry
-func (entry *Entry) FromProto(protoTree *protov1.FilesystemEntry) {
-	if protoTree == nil {
-		return
-	}
-
-	entry.Content = Content{
-		Name:      protoTree.Name,
-		CID:       protoTree.Cid,
-		Type:      protoTree.ContentType,
-		Size:      protoTree.Size,
-		CreatedAt: protoTree.CreatedAt,
-	}
-	if len(protoTree.Version) > 0 {
-		entry.Content.Version = protoTree.Version[0]
-	}
-	entry.Path = protoTree.Path
-
-	entry.Entries = make([]*Entry, len(protoTree.Entries))
-	for i, protoEntry := range protoTree.Entries {
-		entry.Entries[i] = &Entry{}
-		entry.Entries[i].FromProto(protoEntry)
-	}
-}
-
-// ToProto converts Entry to protobuf
-func (entry *Entry) ToProto() *protov1.FilesystemEntry {
-	protoTree := &protov1.FilesystemEntry{
-		Name:        entry.Name,
-		Cid:         entry.CID,
-		ContentType: entry.Type,
-		Size:        entry.Size,
-		CreatedAt:   entry.CreatedAt,
-		Version:     []byte{entry.Version},
-		Path:        entry.Path,
-	}
-
-	protoTree.Entries = make([]*protov1.FilesystemEntry, len(entry.Entries))
-	for i, en := range entry.Entries {
-		protoTree.Entries[i] = en.ToProto()
-	}
-	return protoTree
 }
 
 // Meta holds some extra fields for entry
@@ -168,10 +119,13 @@ func (entry *Entry) Validate() error {
 	if entry.Name == "." && len(entry.Path) == 0 {
 		return ErrEmptyPath
 	}
+	if !utf8.ValidString(entry.Path) {
+		return ErrIllegalPathChars
+	}
 	if strings.Contains(entry.Path, SpecialPathSymbol) {
 		return ErrIllegalPathChars
 	}
-	if entry.IsEmptyFolder() && len(CleanPath(entry.Path)) == 0 {
+	if entry.IsEmptyFolder() && (len(CleanPath(entry.Path)) == 0 || CleanPath(entry.Path) == Separator) {
 		return ErrEmptyName
 	}
 	return entry.Content.Validate()
@@ -304,36 +258,8 @@ func (c *Content) copy() *Content {
 
 // Trie is the structure behind
 type Trie struct {
-	Root    *Entry          `json:"root"`
-	Context context.Context `json:"-"`
-	lock    sync.RWMutex
-}
-
-// FromProto converts protobuf representation to Trie
-func (mt *Trie) FromProto(protoTrie *protov1.Trie) {
-	mt.lock.Lock()
-	defer mt.lock.Unlock()
-
-	mt.Root = &Entry{}
-	mt.Root.FromProto(protoTrie.Root)
-}
-
-// ToProto converts Trie to protobuf representation
-func (mt *Trie) ToProto() protov1.Trie {
-	if mt == nil {
-		return protov1.Trie{}
-	}
-
-	mt.lock.RLock()
-	defer mt.lock.RUnlock()
-
-	if mt.Root == nil {
-		return protov1.Trie{}
-	}
-
-	return protov1.Trie{
-		Root: mt.Root.ToProto(),
-	}
+	Root *Entry `json:"root"`
+	lock sync.RWMutex
 }
 
 // NewTrie creates new instance of user's file system trie
@@ -359,21 +285,10 @@ func (mt *Trie) Hash() (string, error) {
 	return fmt.Sprintf("%x", hashFunc.Sum(nil)), nil
 }
 
-// NewTrieWithContext creates new instance of user's file system trie with context
-func NewTrieWithContext(ctx context.Context) *Trie {
-	return &Trie{
-		Context: ctx,
-		lock:    sync.RWMutex{},
-	}
-}
-
 // AddFile add new node to the tire
 func (mt *Trie) AddFile(m *Entry) ([]*Entry, error) {
 	mt.lock.Lock()
 	defer mt.lock.Unlock()
-
-	stop := trace(mt.Context, "filesystem.add")
-	defer stop()
 
 	if m == nil {
 		return nil, ErrConflict
@@ -398,9 +313,6 @@ func (mt *Trie) Ls(path string) []*Content {
 	mt.lock.RLock()
 	defer mt.lock.RUnlock()
 
-	stop := trace(mt.Context, "filesystem.ls")
-	defer stop()
-
 	if mt.Root == nil {
 		return []*Content{}
 	}
@@ -413,9 +325,6 @@ func (mt *Trie) Ls(path string) []*Content {
 func (mt *Trie) Tree(path string) *Entry {
 	mt.lock.RLock()
 	defer mt.lock.RUnlock()
-
-	stop := trace(mt.Context, "filesystem.tree")
-	defer stop()
 
 	p := CleanPath(path)
 	var t *Entry
@@ -446,9 +355,6 @@ func (mt *Trie) LsRecursive(path string) []*Entry {
 // lsRecursive is the lock-free core of LsRecursive.
 // Callers must hold at least a read lock.
 func (mt *Trie) lsRecursive(path string) []*Entry {
-	stop := trace(mt.Context, "filesystem.ls-recursive")
-	defer stop()
-
 	if mt.Root == nil {
 		return []*Entry{}
 	}
@@ -466,9 +372,6 @@ func (mt *Trie) lsRecursive(path string) []*Entry {
 func (mt *Trie) File(path string) (*Content, error) {
 	mt.lock.RLock()
 	defer mt.lock.RUnlock()
-
-	stop := trace(mt.Context, "filesystem.file")
-	defer stop()
 
 	if len(path) == 0 {
 		return nil, ErrEmptyPath
@@ -491,9 +394,6 @@ func (mt *Trie) File(path string) (*Content, error) {
 func (mt *Trie) Stat(path string) (*Content, error) {
 	mt.lock.RLock()
 	defer mt.lock.RUnlock()
-
-	stop := trace(mt.Context, "filesystem.stat")
-	defer stop()
 
 	if len(path) == 0 {
 		return nil, ErrEmptyPath
@@ -520,9 +420,6 @@ func (mt *Trie) Replace(path string, cnt *Content) (*Content, *Content, error) {
 	mt.lock.Lock()
 	defer mt.lock.Unlock()
 
-	stop := trace(mt.Context, "filesystem.replace")
-	defer stop()
-
 	if len(path) == 0 {
 		return nil, nil, ErrEmptyPath
 	}
@@ -545,9 +442,6 @@ func (mt *Trie) Replace(path string, cnt *Content) (*Content, *Content, error) {
 
 // Delete deletes associated file system entry by path
 func (mt *Trie) Delete(path string) error {
-	stop := trace(mt.Context, "filesystem.delete")
-	defer stop()
-
 	mt.lock.Lock()
 	defer mt.lock.Unlock()
 
@@ -572,8 +466,6 @@ func (mt *Trie) Delete(path string) error {
 func (mt *Trie) CreateRef(path string, bucketID string, createdAt time.Time) ([]*Entry, error) {
 	mt.lock.Lock()
 	defer mt.lock.Unlock()
-	stop := trace(mt.Context, "filesystem.create-ref")
-	defer stop()
 
 	if len(path) == 0 {
 		return nil, ErrEmptyPath
@@ -688,6 +580,15 @@ func commonPrefix(a, b string) string {
 	for i > 0 && i < len(a) && !utf8.RuneStart(a[i]) {
 		i--
 	}
+	// Handle case where i == len(a) and a has trailing incomplete rune
+	if i > 0 && i == len(a) && !utf8.ValidString(a[i-1:]) {
+		for i > 0 && !utf8.RuneStart(a[i-1]) {
+			i--
+		}
+		if i > 0 {
+			i-- // drop the leading byte of the incomplete rune
+		}
+	}
 	return a[:i]
 }
 
@@ -775,7 +676,7 @@ func extend(subtrie *Entry, what *Entry) error {
 	}
 
 	for _, me := range subtrie.Entries {
-		if me.Path == SpecialPathSymbol || me.Path[0] == SeparatorRune {
+		if me.Path == SpecialPathSymbol || (len(me.Path) > 0 && me.Path[0] == SeparatorRune) {
 			return ErrConflict
 		}
 	}
@@ -819,9 +720,19 @@ func add(subtrie *Entry, what *Entry) error {
 func list(path string, subtrie *Entry) []*Content {
 	res := make([]*Content, 0)
 
+	if path == Separator && subtrie.Path == Separator {
+		for _, me := range subtrie.Entries {
+			if me.Path == SpecialPathSymbol {
+				continue
+			}
+			res = append(res, collect("", "", me)...)
+		}
+		return res
+	}
+
 	if strings.HasPrefix(subtrie.Path, path) && subtrie.Path != path {
 		suffix := strings.TrimPrefix(subtrie.Path, path)
-		if len(suffix) != 0 && suffix[0] == SeparatorRune {
+		if len(suffix) != 0 && (suffix[0] == SeparatorRune || path == Separator) {
 			return collect(path, "", subtrie)
 		}
 		return nil
@@ -858,8 +769,12 @@ func tree(dir *Entry, _path string, subtrie *Entry) *Entry {
 func listRecursive(_path string, fixedPath string, subtrie *Entry) []*Entry {
 	entries := list(_path, subtrie)
 	res := make([]*Entry, 0)
+	trimPrefix := fixedPath
+	if trimPrefix == Separator {
+		trimPrefix = ""
+	}
 	for _, c := range entries {
-		res = append(res, &Entry{Content: *c, Path: strings.TrimPrefix(JoinPath(_path, c.Name), fixedPath)})
+		res = append(res, &Entry{Content: *c, Path: strings.TrimPrefix(JoinPath(_path, c.Name), trimPrefix)})
 		if c.Type == MIMEDriveDirectory {
 			chldrn := listRecursive(JoinPath(_path, c.Name), fixedPath, subtrie)
 			res = append(res, chldrn...)
@@ -1071,7 +986,7 @@ func stat(subprefix string, subtrie *Entry) *Content {
 				return &cnt
 			}
 		}
-		if subprefix[0] == SeparatorRune {
+		if len(subprefix) > 0 && subprefix[0] == SeparatorRune {
 			cnt := NewContent("", "", 0, MIMEDriveDirectory, time.Unix(subtrie.CreatedAt, 0))
 			return &cnt
 		}
@@ -1133,12 +1048,3 @@ func fixEntries(entries []*Entry, prefix string) []*Entry {
 	return entries
 }
 
-func trace(ctx context.Context, name string) (stop func()) {
-	span, _ := tracer.StartSpanFromContext(ctx, name,
-		tracer.ServiceName("cs-filesystem"),
-		tracer.SpanType("filesystem"),
-		tracer.AnalyticsRate(1))
-	return func() {
-		span.Finish()
-	}
-}
