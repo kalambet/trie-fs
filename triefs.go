@@ -17,13 +17,13 @@ import (
 
 const (
 	// MIMEDriveDirectory mime type used only for return values, directory is completely ephemeral
-	MIMEDriveDirectory = "application/chainsafe-files-directory"
+	MIMEDriveDirectory = "application/triefs-directory"
 	// MIMEDriveEntry mime type that describes internal trie node
-	MIMEDriveEntry = "application/chainsafe-files-entry"
+	MIMEDriveEntry = "application/triefs-entry"
 	// MIMEOctetStream is a copy of mime type from Echo so we do not need Echo dependency for this Package
 	MIMEOctetStream = "application/octet-stream"
 	// MIMEReference is mime type from that is referenced to another filesystem
-	MIMEReference = "application/chainsafe-files-reference"
+	MIMEReference = "application/triefs-reference"
 
 	// SpecialPathSymbol the only symbol you can't use in paths or names
 	SpecialPathSymbol = ":"
@@ -1047,4 +1047,3 @@ func fixEntries(entries []*Entry, prefix string) []*Entry {
 	}
 	return entries
 }
-
